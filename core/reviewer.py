@@ -168,10 +168,7 @@ def _parse_llm_response(raw_text: str, chunk: dict) -> list:
             comments = [comments]
         if not isinstance(comments, list):
             return []
-        # Filter out None — _sanitize_comment returns None for empty/invalid comments
-        # Without this filter, None values crash get_review_summary's c.get() calls
-        sanitized = [_sanitize_comment(item) for item in comments if isinstance(item, dict)]
-        return [c for c in sanitized if c is not None]
+        return [_sanitize_comment(item) for item in comments if isinstance(item, dict)]
     except Exception:
         return []
 
@@ -180,8 +177,9 @@ def _sanitize_comment(raw: dict) -> dict | None:
     if not isinstance(raw, dict):
         return None
 
+    # Accept both description and detail — LLM sometimes uses either field name
     issue = str(raw.get("issue", "")).strip()
-    desc = str(raw.get("description", "")).strip()
+    desc = str(raw.get("description", raw.get("detail", ""))).strip()
 
     if not issue and not desc:
         return None
