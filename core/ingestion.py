@@ -62,7 +62,7 @@ def clone_and_collect(repo_url: str) -> dict:
         # GitPython clones the repo; depth=1 fetches only the latest
         # commit — much faster than full history for large repos
         Repo.clone_from(
-            repo_url,
+            repo_url.strip(),
             temp_dir,
             depth=1,           # shallow clone = faster
             single_branch=True # only the default branch
