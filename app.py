@@ -6,6 +6,9 @@
 #            2. We clone + parse + review it
 #            3. Results shown with filters, confidence badges,
 #               severity colours, and a download button
+#
+# FIX: Added is_reviewing flag to disable filters during review
+#      so clicking them mid-review does not restart the pipeline
 # ═══════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -19,6 +22,17 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from dotenv import load_dotenv
 load_dotenv()
+
+# ── Streamlit Cloud secrets support ───────────────────────────
+# On Streamlit Cloud there is no .env file — secrets live in
+# st.secrets. We push them into os.environ so that reviewer.py
+# (which uses os.getenv) can read them without any changes.
+try:
+    for _key in ["GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3", "GITHUB_TOKEN"]:
+        if _key in st.secrets and not os.getenv(_key):
+            os.environ[_key] = st.secrets[_key]
+except Exception:
+    pass  # Running locally — st.secrets not available, .env is used
 
 # Import our three pipeline modules
 from core.ingestion import clone_and_collect, cleanup_repo
@@ -98,13 +112,12 @@ st.markdown("""
     margin: 16px 0 8px 0;
 }
 
-/* ── Metric cards ── */
-.metric-card {
-    background: white;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 14px;
-    text-align: center;
+/* ── Disabled filter label ── */
+.filter-disabled-note {
+    color: #94a3b8;
+    font-size: 0.78rem;
+    font-style: italic;
+    margin-top: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -155,7 +168,6 @@ def render_comment(comment: dict, index: int):
         st.markdown(header_html, unsafe_allow_html=True)
 
         # Confidence progress bar — visual indicator of certainty
-        # Colour changes: red → yellow → green based on tier
         bar_color = "#16a34a" if confidence_tier == "high" else ("#ca8a04" if confidence_tier == "medium" else "#dc2626")
         st.markdown(f"""
         <div style="background:#e2e8f0; border-radius:4px; height:5px; margin:6px 0 10px 0;">
@@ -213,7 +225,6 @@ def generate_markdown_report(results: list, repo_url: str, summary: dict) -> str
         "## Severity Summary",
     ]
 
-    # Severity breakdown table
     lines.append("| Severity | Count |")
     lines.append("|----------|-------|")
     for sev, count in summary["severity_counts"].items():
@@ -230,7 +241,6 @@ def generate_markdown_report(results: list, repo_url: str, summary: dict) -> str
     lines.append("\n---\n")
     lines.append("## Findings by File\n")
 
-    # Group results by file
     files_seen = {}
     for result in results:
         fname = result.get("file", "unknown")
@@ -279,7 +289,6 @@ def render_sidebar(summary: dict, parse_summary: dict):
 
     st.sidebar.markdown("## 📊 Review Stats")
 
-    # Top-level numbers
     st.sidebar.metric("Total Issues",     summary["total_comments"])
     st.sidebar.metric("Files Reviewed",   summary["files_reviewed"])
     st.sidebar.metric("Chunks Reviewed",  summary["total_chunks"])
@@ -290,11 +299,8 @@ def render_sidebar(summary: dict, parse_summary: dict):
 
     st.sidebar.markdown("---")
 
-    # ── Severity breakdown ─────────────────────────────────────
     st.sidebar.markdown("### 🎯 By Severity")
     sev = summary["severity_counts"]
-
-    # Colour-coded severity bars
     sev_colors = {
         "critical": "#dc2626",
         "high":     "#ea580c",
@@ -308,7 +314,7 @@ def render_sidebar(summary: dict, parse_summary: dict):
         count = sev.get(level, 0)
         if count == 0:
             continue
-        pct = int((count / total_comments) * 100)
+        pct   = int((count / total_comments) * 100)
         color = sev_colors[level]
         st.sidebar.markdown(f"""
         <div style="margin-bottom:6px;">
@@ -324,10 +330,8 @@ def render_sidebar(summary: dict, parse_summary: dict):
 
     st.sidebar.markdown("---")
 
-    # ── Confidence tier breakdown ──────────────────────────────
     st.sidebar.markdown("### 🎲 By Confidence")
     tiers = summary["tier_counts"]
-
     conf_colors = {"high":"#16a34a", "medium":"#ca8a04", "low":"#dc2626"}
     for tier in ("high","medium","low"):
         count = tiers.get(tier, 0)
@@ -350,7 +354,6 @@ def render_sidebar(summary: dict, parse_summary: dict):
 
     st.sidebar.markdown("---")
 
-    # ── Parse stats ────────────────────────────────────────────
     st.sidebar.markdown("### 🧩 Code Structure")
     st.sidebar.markdown(f"- **Functions:** {parse_summary.get('functions', 0)}")
     st.sidebar.markdown(f"- **Classes:** {parse_summary.get('classes', 0)}")
@@ -363,6 +366,21 @@ def render_sidebar(summary: dict, parse_summary: dict):
 # ══════════════════════════════════════════════════════════════
 
 def main():
+
+    # ── Initialise session state defaults ─────────────────────
+    # is_reviewing: True while the pipeline is running
+    # This flag disables filters so clicking them mid-review
+    # cannot restart the script and kill the review process
+    if "is_reviewing" not in st.session_state:
+        st.session_state["is_reviewing"] = False
+    if "results" not in st.session_state:
+        st.session_state["results"] = None
+    if "summary" not in st.session_state:
+        st.session_state["summary"] = None
+    if "parse_summary" not in st.session_state:
+        st.session_state["parse_summary"] = None
+    if "repo_url" not in st.session_state:
+        st.session_state["repo_url"] = ""
 
     # ── Header ─────────────────────────────────────────────────
     st.markdown("""
@@ -384,13 +402,33 @@ def main():
             "GitHub Repository URL",
             placeholder="https://github.com/username/repository",
             label_visibility="collapsed",
+            # Disable input while reviewing so accidental edits don't rerun
+            disabled=st.session_state["is_reviewing"],
         )
 
     with col_btn:
-        run_clicked = st.button("🚀 Review", use_container_width=True, type="primary")
+        run_clicked = st.button(
+            "🚀 Review",
+            use_container_width=True,
+            type="primary",
+            # Disable button while review is in progress
+            disabled=st.session_state["is_reviewing"],
+        )
 
-    # ── Filter bar (shown always, active only after review) ────
+    # ── Filter bar ─────────────────────────────────────────────
+    # Filters are DISABLED while is_reviewing=True
+    # This is the core fix — prevents Streamlit rerun from
+    # killing the review pipeline mid-way
+    is_reviewing = st.session_state["is_reviewing"]
+
     st.markdown("##### Filters")
+    if is_reviewing:
+        # Show a clear message so the user knows why filters are greyed out
+        st.markdown(
+            '<p class="filter-disabled-note">⏳ Filters are disabled while review is running — they will activate when complete.</p>',
+            unsafe_allow_html=True
+        )
+
     fcol1, fcol2, fcol3 = st.columns(3)
 
     with fcol1:
@@ -398,12 +436,14 @@ def main():
             "Severity",
             options=["critical","high","medium","low","info"],
             default=["critical","high","medium","low","info"],
+            disabled=is_reviewing,   # greyed out during review
         )
     with fcol2:
         filter_confidence = st.multiselect(
             "Confidence Tier",
             options=["high","medium","low"],
             default=["high","medium","low"],
+            disabled=is_reviewing,   # greyed out during review
             help="'low' tier shows the 'verify this' warning",
         )
     with fcol3:
@@ -411,6 +451,7 @@ def main():
             "Category",
             options=["bug","security","performance","style","maintainability","error_handling","documentation"],
             default=["bug","security","performance","style","maintainability","error_handling","documentation"],
+            disabled=is_reviewing,   # greyed out during review
         )
 
     st.markdown("---")
@@ -424,86 +465,104 @@ def main():
             st.error("Please enter a GitHub repository URL.")
             return
 
-        # Use session_state to persist results across Streamlit reruns
-        # (Streamlit re-runs the whole script on every interaction)
+        # Mark reviewing as started — this disables filters immediately
+        st.session_state["is_reviewing"]  = True
         st.session_state["results"]       = None
         st.session_state["summary"]       = None
         st.session_state["parse_summary"] = None
         st.session_state["repo_url"]      = repo_url
 
-        # ── Step 1: Clone ──────────────────────────────────────
-        with st.status("🔄 Cloning repository...", expanded=True) as status:
-            st.write(f"Connecting to `{repo_url}`...")
-            ingestion_result = clone_and_collect(repo_url)
+        try:
+            # ── Step 1: Clone ──────────────────────────────────
+            with st.status("🔄 Cloning repository...", expanded=True) as status:
+                st.write(f"Connecting to `{repo_url}`...")
+                ingestion_result = clone_and_collect(repo_url)
 
-            if ingestion_result["error"]:
-                status.update(label="❌ Clone failed", state="error")
-                st.error(f"**Clone failed:** {ingestion_result['error']}")
-                return
+                if ingestion_result["error"]:
+                    status.update(label="❌ Clone failed", state="error")
+                    st.error(f"**Clone failed:** {ingestion_result['error']}")
+                    st.session_state["is_reviewing"] = False
+                    return
 
-            files   = ingestion_result["files"]
-            skipped = ingestion_result["skipped"]
+                files   = ingestion_result["files"]
+                skipped = ingestion_result["skipped"]
 
-            st.write(f"✅ Cloned successfully — {len(files)} Python files found")
-            if skipped:
-                st.write(f"⏭ Skipped {len(skipped)} file(s) (too large / binary / empty)")
+                st.write(f"✅ Cloned successfully — {len(files)} Python files found")
+                if skipped:
+                    st.write(f"⏭ Skipped {len(skipped)} file(s) (too large / binary / empty)")
 
-            # ── Step 2: Parse ──────────────────────────────────
-            status.update(label="🧩 Parsing code with AST...")
-            st.write("Running AST parser on collected files...")
-            chunks = parse_files(files)
-            parse_summary = get_parse_summary(chunks)
+                # ── Step 2: Parse ──────────────────────────────
+                status.update(label="🧩 Parsing code with AST...")
+                st.write("Running AST parser on collected files...")
+                chunks        = parse_files(files)
+                parse_summary = get_parse_summary(chunks)
 
-            st.write(
-                f"✅ Parsed {parse_summary['total_chunks']} chunks — "
-                f"{parse_summary['functions']} functions, "
-                f"{parse_summary['classes']} classes"
-            )
-
-            if parse_summary["parse_errors"] > 0:
-                st.write(f"⚠️ {parse_summary['parse_errors']} file(s) had syntax errors (still reviewed)")
-
-            if not chunks:
-                status.update(label="⚠️ No reviewable code found", state="error")
-                st.warning("No Python functions or classes were found in this repository.")
-                cleanup_repo(ingestion_result["repo_path"])
-                return
-
-            # ── Step 3: LLM Review ─────────────────────────────
-            status.update(label=f"🤖 Reviewing {len(chunks)} chunks with Groq AI...")
-            st.write("Sending chunks to Groq LLM for review...")
-
-            # Progress bar updates as each chunk is reviewed
-            progress_bar  = st.progress(0)
-            progress_text = st.empty()
-
-            def update_progress(current, total, chunk_name):
-                pct = int((current / total) * 100)
-                progress_bar.progress(pct)
-                progress_text.markdown(
-                    f"Reviewing `{chunk_name}` ({current}/{total})"
+                st.write(
+                    f"✅ Parsed {parse_summary['total_chunks']} chunks — "
+                    f"{parse_summary['functions']} functions, "
+                    f"{parse_summary['classes']} classes"
                 )
 
-            results = review_all_chunks(chunks, progress_callback=update_progress)
+                if parse_summary["parse_errors"] > 0:
+                    st.write(f"⚠️ {parse_summary['parse_errors']} file(s) had syntax errors (still reviewed)")
 
-            progress_bar.progress(100)
-            progress_text.markdown("✅ Review complete!")
+                if not chunks:
+                    status.update(label="⚠️ No reviewable code found", state="error")
+                    st.warning("No Python functions or classes were found in this repository.")
+                    cleanup_repo(ingestion_result["repo_path"])
+                    st.session_state["is_reviewing"] = False
+                    return
 
-            # ── Cleanup ────────────────────────────────────────
-            cleanup_repo(ingestion_result["repo_path"])
+                # ── Step 3: LLM Review ─────────────────────────
+                status.update(label=f"🤖 Reviewing {len(chunks)} chunks with Groq AI...")
+                st.write("Sending chunks to Groq LLM for review...")
 
-            # ── Compute summary stats ──────────────────────────
-            summary = get_review_summary(results)
+                progress_bar  = st.progress(0)
+                progress_text = st.empty()
 
-            # Store in session_state so filters can re-render without re-running
-            st.session_state["results"]       = results
-            st.session_state["summary"]       = summary
-            st.session_state["parse_summary"] = parse_summary
+                def update_progress(current, total, chunk_name):
+                    # Update progress bar — safe to call mid-loop
+                    pct = int((current / total) * 100)
+                    progress_bar.progress(pct)
+                    progress_text.markdown(
+                        f"Reviewing `{chunk_name}` ({current}/{total})"
+                    )
 
-            status.update(
-                label=f"✅ Review complete — {summary['total_comments']} issue(s) found",
-                state="complete",
-            )
+                results = review_all_chunks(chunks, progress_callback=update_progress)
+
+                progress_bar.progress(100)
+                progress_text.markdown("✅ Review complete!")
+
+                # ✅ FIX: Show any chunk-level errors so API key issues are visible
+                failed = [r for r in results if r.get("error")]
+                if failed:
+                    with st.expander(f"⚠️ {len(failed)} chunk(s) failed — click to see errors"):
+                        for r in failed:
+                            st.error(f"`{r.get('name')}`: {r.get('error')}")
+
+                # ── Cleanup cloned repo from disk ──────────────
+                cleanup_repo(ingestion_result["repo_path"])
+
+                # ── Compute and store summary ──────────────────
+                summary = get_review_summary(results)
+
+                st.session_state["results"]       = results
+                st.session_state["summary"]       = summary
+                st.session_state["parse_summary"] = parse_summary
+
+                status.update(
+                    label=f"✅ Review complete — {summary['total_comments']} issue(s) found",
+                    state="complete",
+                )
+
+        except Exception as e:
+            # Catch any unexpected error so is_reviewing always gets reset
+            st.error(f"An unexpected error occurred: {str(e)}")
+
+        finally:
+            # ALWAYS reset is_reviewing when pipeline finishes or errors
+            # This re-enables filters regardless of success or failure
+            st.session_state["is_reviewing"] = False
 
     # ══════════════════════════════════════════════════════════
     # Results display — shown after review OR when filters change
@@ -515,7 +574,7 @@ def main():
     stored_url    = st.session_state.get("repo_url", "")
 
     if results is None:
-        # No review has been run yet — show a welcome hint
+        # No review has been run yet — show welcome screen
         st.markdown("""
         <div style="text-align:center; padding:60px 0; color:#94a3b8;">
             <div style="font-size:3rem;">🔍</div>
@@ -529,13 +588,12 @@ def main():
         """, unsafe_allow_html=True)
         return
 
-    # ── Render sidebar stats ───────────────────────────────────
+    # ── Sidebar stats ──────────────────────────────────────────
     render_sidebar(summary, parse_summary)
 
-    # ── Top summary metrics row ───────────────────────────────
+    # ── Top summary metrics ────────────────────────────────────
     m1, m2, m3, m4, m5 = st.columns(5)
     sev = summary["severity_counts"]
-
     m1.metric("🔴 Critical", sev.get("critical", 0))
     m2.metric("🟠 High",     sev.get("high",     0))
     m3.metric("🟡 Medium",   sev.get("medium",   0))
@@ -544,8 +602,7 @@ def main():
 
     st.markdown("---")
 
-    # ── Low-confidence section — shown separately at the top ──
-    # This is the "epistemic humility" section required by the rubric
+    # ── Low-confidence section — epistemic humility feature ───
     low_conf_comments = []
     for r in results:
         for c in r.get("comments", []):
@@ -573,17 +630,15 @@ def main():
 
     st.markdown("---")
 
-    # ── Main results — grouped by file ────────────────────────
+    # ── Main results — filtered and grouped by file ────────────
     st.markdown("## 📋 Review Findings")
 
-    # Apply all three filters to comments before rendering
-    filtered_count = 0
+    filtered_count    = 0
     files_with_issues = {}
 
     for result in results:
         fname = result.get("file", "unknown")
         for comment in result.get("comments", []):
-            # Apply each filter
             if comment.get("severity")        not in filter_severity:   continue
             if comment.get("confidence_tier") not in filter_confidence: continue
             if comment.get("category")        not in filter_category:   continue
@@ -601,14 +656,12 @@ def main():
             unsafe_allow_html=True
         )
 
-        # Render each file section
         for fname, items in files_with_issues.items():
             st.markdown(
                 f"<div class='file-header'>📄 {fname} — {len(items)} issue(s)</div>",
                 unsafe_allow_html=True
             )
 
-            # Within each file, group by chunk (function/class)
             chunks_seen = {}
             for result, comment in items:
                 cname = result.get("name", "unknown")
@@ -617,11 +670,10 @@ def main():
                 chunks_seen[cname].append((result, comment))
 
             for chunk_name, chunk_items in chunks_seen.items():
-                chunk_type  = chunk_items[0][0].get("type", "function")
-                start_line  = chunk_items[0][0].get("start_line", "?")
-                end_line    = chunk_items[0][0].get("end_line", "?")
+                chunk_type = chunk_items[0][0].get("type", "function")
+                start_line = chunk_items[0][0].get("start_line", "?")
+                end_line   = chunk_items[0][0].get("end_line", "?")
 
-                # Collapsible section per function/class
                 with st.expander(
                     f"{'ƒ' if chunk_type == 'function' else '◻'} `{chunk_name}` "
                     f"(lines {start_line}–{end_line}) — {len(chunk_items)} issue(s)",
@@ -630,7 +682,7 @@ def main():
                     for i, (result, comment) in enumerate(chunk_items):
                         render_comment(comment, i)
 
-    # ── Download report button ─────────────────────────────────
+    # ── Download buttons ───────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📥 Download Report")
 
@@ -648,7 +700,6 @@ def main():
         )
 
     with dl_col2:
-        # Also offer raw JSON for programmatic use
         st.download_button(
             label="⬇️ Download Raw JSON",
             data=json.dumps(results, indent=2),

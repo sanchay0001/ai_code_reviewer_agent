@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════════════
 # core/reviewer.py
-# FINAL WORKING VERSION - Phase 3
+# FIXED VERSION — Key loading + error visibility + retry logic
 # ═══════════════════════════════════════════════════════════════
 
 import os
@@ -27,11 +27,23 @@ _key_index = 0
 
 
 def _get_all_keys():
+    """
+    Load Groq API keys from environment.
+    Checks GROQ_API_KEY_1/2/3 first, then falls back to plain GROQ_API_KEY.
+    """
     keys = []
     for i in range(1, 4):
         val = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
         if val and len(val) > 30 and not val.startswith("your_"):
             keys.append(val)
+
+    # ✅ FIX 1: Also check the plain GROQ_API_KEY as a fallback.
+    # Many .env files use just GROQ_API_KEY, not GROQ_API_KEY_1.
+    if not keys:
+        val = os.getenv("GROQ_API_KEY", "").strip()
+        if val and len(val) > 30 and not val.startswith("your_"):
+            keys.append(val)
+
     return keys
 
 
@@ -39,7 +51,10 @@ def _get_next_client():
     global _key_index
     keys = _get_all_keys()
     if not keys:
-        raise ValueError("No Groq API keys found!")
+        raise ValueError(
+            "No valid Groq API keys found! "
+            "Set GROQ_API_KEY (or GROQ_API_KEY_1) in your .env file."
+        )
 
     key = keys[_key_index % len(keys)]
     key_num = (_key_index % len(keys)) + 1
@@ -52,7 +67,16 @@ def _get_next_client():
 # ── Prompts ───────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are an expert Python code reviewer.
 Respond with ONLY a valid JSON array of review comments.
-Return [] if no issues found."""
+Each comment must have these fields:
+  - issue: short title of the problem
+  - description: detailed explanation
+  - suggestion: how to fix it
+  - severity: one of critical, high, medium, low, info
+  - category: one of bug, security, performance, style, maintainability, error_handling, documentation
+  - line_hint: approximate line number or range as a string
+  - confidence: integer 0-100
+
+Return [] if no issues found. Do NOT include any text outside the JSON array."""
 
 
 def _build_user_prompt(chunk):
@@ -80,16 +104,18 @@ def _build_user_prompt(chunk):
 
 def review_chunk(chunk):
     user_prompt = _build_user_prompt(chunk)
-    model_used = PRIMARY_MODEL
     last_error = None
 
     for attempt in range(MAX_RETRIES):
+        # ✅ FIX 2: Choose model BEFORE making the API call.
+        # Use fallback model on attempts 1+ so we don't waste
+        # a retry on the same model that already failed.
+        model_used = PRIMARY_MODEL if attempt == 0 else FALLBACK_MODEL
+
         try:
             client, key_num = _get_next_client()
-            if attempt == 1:
-                model_used = FALLBACK_MODEL
 
-            print(f"  [LLM] {str(chunk.get('name',''))[:40]:<40} key={key_num}")
+            print(f"  [LLM] {str(chunk.get('name',''))[:40]:<40} key={key_num} model={model_used} attempt={attempt+1}")
 
             response = client.chat.completions.create(
                 model=model_used,
@@ -104,7 +130,6 @@ def review_chunk(chunk):
             raw_text = response.choices[0].message.content.strip()
             comments = _parse_llm_response(raw_text, chunk)
 
-            # Strong safety net
             if not isinstance(comments, list):
                 comments = []
 
@@ -115,7 +140,7 @@ def review_chunk(chunk):
                 "type": chunk["type"],
                 "start_line": chunk["start_line"],
                 "end_line": chunk["end_line"],
-                "comments": comments,
+                "comments": [c for c in comments if c is not None],
                 "model_used": model_used,
                 "key_used": key_num,
                 "error": None
@@ -123,9 +148,14 @@ def review_chunk(chunk):
 
         except Exception as e:
             last_error = str(e)
-            print(f"  [LLM] Attempt {attempt+1} failed: {last_error[:100]}")
-            time.sleep(RETRY_BASE_DELAY * (attempt + 1))
+            # ✅ FIX 3: Print the full error so it shows in terminal/logs.
+            print(f"  [LLM] Attempt {attempt+1} FAILED: {last_error}")
+            if attempt < MAX_RETRIES - 1:
+                sleep_time = RETRY_BASE_DELAY * (attempt + 1)
+                print(f"  [LLM] Waiting {sleep_time}s before retry...")
+                time.sleep(sleep_time)
 
+    print(f"  [LLM] All retries exhausted for chunk: {chunk.get('name')}. Last error: {last_error}")
     return {
         "chunk_id": chunk["chunk_id"],
         "file": chunk["file"],
@@ -134,7 +164,7 @@ def review_chunk(chunk):
         "start_line": chunk["start_line"],
         "end_line": chunk["end_line"],
         "comments": [],
-        "model_used": model_used,
+        "model_used": FALLBACK_MODEL,
         "key_used": -1,
         "error": last_error
     }
@@ -151,6 +181,7 @@ def _parse_llm_response(raw_text: str, chunk: dict) -> list:
     end = text.rfind("]")
 
     if start == -1 or end == -1:
+        # Try wrapping a lone JSON object in an array
         obj_start = text.find("{")
         obj_end = text.rfind("}")
         if obj_start != -1 and obj_end != -1:
@@ -158,6 +189,7 @@ def _parse_llm_response(raw_text: str, chunk: dict) -> list:
             start = 0
             end = len(text) - 1
         else:
+            print(f"  [Parser] No JSON array found in response for {chunk.get('name')}")
             return []
 
     json_str = text[start:end + 1]
@@ -168,8 +200,11 @@ def _parse_llm_response(raw_text: str, chunk: dict) -> list:
             comments = [comments]
         if not isinstance(comments, list):
             return []
-        return [_sanitize_comment(item) for item in comments if isinstance(item, dict)]
-    except Exception:
+        sanitized = [_sanitize_comment(item) for item in comments if isinstance(item, dict)]
+        return [c for c in sanitized if c is not None]
+    except Exception as e:
+        print(f"  [Parser] JSON parse error for {chunk.get('name')}: {e}")
+        print(f"  [Parser] Raw JSON string: {json_str[:200]}")
         return []
 
 
@@ -177,7 +212,6 @@ def _sanitize_comment(raw: dict) -> dict | None:
     if not isinstance(raw, dict):
         return None
 
-    # Accept both description and detail — LLM sometimes uses either field name
     issue = str(raw.get("issue", "")).strip()
     desc = str(raw.get("description", raw.get("detail", ""))).strip()
 
@@ -214,6 +248,16 @@ def _get_confidence_tier(score: int) -> str:
 
 
 def review_all_chunks(chunks: list, progress_callback=None) -> list:
+    # ✅ FIX 4: Validate keys BEFORE starting the loop.
+    # Fail fast with a clear error instead of silently returning empty results.
+    keys = _get_all_keys()
+    if not keys:
+        raise ValueError(
+            "No Groq API keys found! "
+            "Please set GROQ_API_KEY (or GROQ_API_KEY_1) in your .env file."
+        )
+    print(f"[Reviewer] Starting review of {len(chunks)} chunks with {len(keys)} key(s).")
+
     results = []
     for i, chunk in enumerate(chunks, 1):
         if progress_callback:
@@ -228,15 +272,19 @@ def get_review_summary(results: list) -> dict:
     for r in results:
         comments = r.get("comments")
         if isinstance(comments, list):
-            all_comments.extend(comments)
+            all_comments.extend([c for c in comments if c is not None and isinstance(c, dict)])
 
-    severity_counts = {"critical":0, "high":0, "medium":0, "low":0, "info":0}
+    severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for c in all_comments:
-        severity_counts[c.get("severity", "medium")] += 1
+        sev = c.get("severity", "medium")
+        if sev in severity_counts:
+            severity_counts[sev] += 1
 
-    tier_counts = {"high":0, "medium":0, "low":0}
+    tier_counts = {"high": 0, "medium": 0, "low": 0}
     for c in all_comments:
-        tier_counts[c.get("confidence_tier", "medium")] += 1
+        tier = c.get("confidence_tier", "medium")
+        if tier in tier_counts:
+            tier_counts[tier] += 1
 
     confidences = [c.get("confidence", 0) for c in all_comments]
     avg_confidence = round(sum(confidences) / len(confidences), 1) if confidences else 0

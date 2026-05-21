@@ -87,8 +87,8 @@ ai_code_reviewer_agent/
 │   └── reviewer.py                 # Phase 3 — Groq LLM review
 │
 ├── tests/
-│   ├── test_phase1_ingestion.py    #  8 tests
-│   ├── test_phase2_parser.py       # 10 tests
+│   ├── test_phase1.py    #  8 tests
+│   ├── test_phase2.py       # 10 tests
 │   ├── test_phase3.py              # 14 tests
 │   └── test_phase4.py              # 23 tests
 │
@@ -154,8 +154,8 @@ Open **http://localhost:8501**, paste a public GitHub URL, and click **Review**.
 ## 🧪 Tests
 
 ```bash
-python tests/test_phase1_ingestion.py   #  8 tests — ingestion
-python tests/test_phase2_parser.py      # 10 tests — AST parser
+python tests/test_phase1.py   #  8 tests — ingestion
+python tests/test_phase2.py      # 10 tests — AST parser
 python tests/test_phase3.py             # 14 tests — LLM reviewer
 python tests/test_phase4.py             # 23 tests — dashboard + integration
 ```

@@ -1,0 +1,14 @@
+[server]
+# Needed on Streamlit Cloud — disables file watcher that crashes on some hosts
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[theme]
+# Dark theme to match the screenshot
+base = "dark"
+primaryColor = "#ef4444"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#f1f5f9"
+font = "sans serif"
