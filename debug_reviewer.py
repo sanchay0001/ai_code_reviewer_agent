@@ -40,13 +40,15 @@ else:
     print(f"Found {len(keys)} key(s)")
     client = Groq(api_key=keys[0])
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",   # was: llama-3.3-70b-versatile (decommissioned 16 Aug 2026)
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT}
         ],
         temperature=0.1,
-        max_tokens=1200,
+        max_tokens=1800,               # bumped 1200 -> 1800: reasoning headroom
+        reasoning_effort="low",        # minimal internal thinking — structured JSON task
+        reasoning_format="hidden",     # keep reasoning out of .content
     )
     raw = response.choices[0].message.content.strip()
     print("\n=== RAW LLM RESPONSE ===")

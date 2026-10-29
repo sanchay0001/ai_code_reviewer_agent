@@ -1,6 +1,8 @@
 # ═══════════════════════════════════════════════════════════════
 # core/reviewer.py
 # FIXED VERSION — Key loading + error visibility + retry logic
+# UPDATED — migrated off decommissioned Groq models, added
+#           reasoning_effort/reasoning_format for gpt-oss models
 # ═══════════════════════════════════════════════════════════════
 
 import os
@@ -18,8 +20,8 @@ for var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY
 os.environ["NO_PROXY"] = "*"
 
 # ── Config ────────────────────────────────────────────────────
-PRIMARY_MODEL = "llama-3.3-70b-versatile"
-FALLBACK_MODEL = "llama-3.1-8b-instant"
+PRIMARY_MODEL = "openai/gpt-oss-120b"    # was: llama-3.3-70b-versatile (decommissioned 16 Aug 2026)
+FALLBACK_MODEL = "openai/gpt-oss-20b"    # was: llama-3.1-8b-instant (decommissioned 16 Aug 2026)
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 5
 
@@ -124,7 +126,9 @@ def review_chunk(chunk):
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=1200,
+                max_tokens=1800,              # bumped 1200 -> 1800: JSON array + reasoning headroom
+                reasoning_effort="low",       # GPT-OSS models reason internally by default — keep it light
+                reasoning_format="hidden",    # never leak reasoning tokens into .content
             )
 
             raw_text = response.choices[0].message.content.strip()
