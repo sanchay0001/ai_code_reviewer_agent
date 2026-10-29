@@ -9,6 +9,12 @@
 #
 # FIX: Added is_reviewing flag to disable filters during review
 #      so clicking them mid-review does not restart the pipeline
+# FIX: Moved st.set_page_config() to be the true first Streamlit
+#      command — it was previously placed after the st.secrets
+#      try/except block, which can itself trigger an implicit
+#      Streamlit command (the "no secrets file found" warning)
+#      when no secrets.toml exists, causing set_page_config() to
+#      fail with StreamlitAPIException.
 # ═══════════════════════════════════════════════════════════════
 
 import streamlit as st
@@ -19,6 +25,19 @@ import sys
 
 # Make sure core/ is importable when running from project root
 sys.path.insert(0, os.path.dirname(__file__))
+
+# ══════════════════════════════════════════════════════════════
+# Page config — MUST be the very first Streamlit command, before
+# anything else that touches st.* (including st.secrets access
+# below, which can itself trigger an implicit Streamlit command
+# if no secrets.toml file exists)
+# ══════════════════════════════════════════════════════════════
+st.set_page_config(
+    page_title="AI Code Reviewer",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -38,17 +57,6 @@ except Exception:
 from core.ingestion import clone_and_collect, cleanup_repo
 from core.parser    import parse_files, get_parse_summary
 from core.reviewer  import review_all_chunks, get_review_summary
-
-
-# ══════════════════════════════════════════════════════════════
-# Page config — must be the FIRST Streamlit call in the file
-# ══════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="AI Code Reviewer",
-    page_icon="🔍",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 
 # ══════════════════════════════════════════════════════════════
